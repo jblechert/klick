@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# install.sh – set up atspi-search and bind it to Super+F in KDE Plasma 6
+# install.sh – set up atspi-search and bind it to a global shortcut in KDE Plasma 6
+#
+# Usage:  ./install.sh [shortcut]
+#   shortcut defaults to Meta+Shift+F
+#   Examples: ./install.sh "Meta+E"  ./install.sh "Ctrl+Alt+Space"
 set -euo pipefail
 
+SHORTCUT="${1:-Meta+Shift+F}"
 INSTALL_DIR="$HOME/.local/share/atspi-search"
 BIN="$HOME/.local/bin/atspi-search"
 KWIN_DIR="$HOME/.local/share/kwin/scripts/atspisearch"
@@ -47,27 +52,26 @@ EOF
 systemctl --user daemon-reload
 
 # ── 5. KWin script ────────────────────────────────────────────────────────────
-echo "==> Installing KWin script..."
+echo "==> Installing KWin script (shortcut: $SHORTCUT)..."
 mkdir -p "$KWIN_DIR/contents/code"
 
 cat > "$KWIN_DIR/metadata.json" << 'EOF'
 {
     "KPackageStructure": "KWin/Script",
     "KPlugin": {
-        "Description": "Launch atspi-search with Super+F",
+        "Description": "Launch atspi-search element search overlay",
         "Name": "Search UI Elements",
         "UniqueId": "atspisearch"
     }
 }
 EOF
 
-# callDBus fires StartUnit on the systemd user session to run atspi-search.
-# StartUnit(name, mode) uses only string args — works cleanly with callDBus.
-cat > "$KWIN_DIR/contents/code/main.js" << 'EOF'
+# callDBus StartUnit uses only two string args — works cleanly with KWin's callDBus.
+cat > "$KWIN_DIR/contents/code/main.js" << EOF
 registerShortcut(
     "atspi-search",
     "Search UI Elements",
-    "Meta+F",
+    "$SHORTCUT",
     function () {
         callDBus(
             "org.freedesktop.systemd1",
@@ -81,16 +85,25 @@ registerShortcut(
 );
 EOF
 
-# ── 6. enable and reload ──────────────────────────────────────────────────────
+# ── 6. enable script and register shortcut ────────────────────────────────────
 echo "==> Enabling KWin script..."
 kwriteconfig6 --file kwinrc --group Plugins --key atspisearchEnabled true
 
-echo "==> Reloading KWin..."
-if qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null; then
-    echo "    KWin reloaded — shortcut is active now."
-else
-    echo "    Could not reload KWin via D-Bus. Log out and back in to activate."
-fi
+# Write the shortcut key directly into kglobalshortcutsrc.
+# reconfigure alone does not override an existing (possibly empty) stored binding,
+# so we set it explicitly before loading the script.
+kwriteconfig6 --file kglobalshortcutsrc --group kwin \
+    --key "atspi-search" "$SHORTCUT,$SHORTCUT,Search UI Elements"
+
+# Load the script and start execution (reconfigure alone does not load new scripts).
+echo "==> Loading KWin script..."
+qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript atspisearch 2>/dev/null || true
+qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript \
+    "$KWIN_DIR/contents/code/main.js" "atspisearch"
+qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start
+qdbus6 org.kde.KWin /KWin reconfigure
+
+echo "    Shortcut $SHORTCUT is active."
 
 # ── 7. PATH reminder ──────────────────────────────────────────────────────────
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
@@ -100,4 +113,4 @@ if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
 fi
 
 echo ""
-echo "Done. Press Super+F over any window to search its UI elements."
+echo "Done. Press $SHORTCUT over any window to search its UI elements."

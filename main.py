@@ -1,280 +1,336 @@
 #!/usr/bin/env python3
 """
-wayland-palette.py – Globale Command Palette für Wayland
-=========================================================
-Liest über AT-SPI alle Buttons, Menüpunkte und interaktiven
-Elemente der aktiven App und zeigt sie in fuzzel/wofi/rofi zur Suche an.
+atspi-search – KDE element search overlay with live highlighting
 
-Abhängigkeiten:
-  pip install pyatspi
-  + fuzzel ODER wofi ODER rofi installiert
-
-Hotkey-Setup (Beispiel für Sway/Hyprland):
-  sway:     bindsym $mod+Space exec python3 /pfad/wayland-palette.py
-  hyprland: bind = $mainMod, Space, exec, python3 /pfad/wayland-palette.py
-  GNOME:    Einstellungen → Tastaturkürzel → Benutzerdefiniert
+Dependencies:
+    pip install pyatspi PyQt6
 """
 
-import subprocess
+import signal
 import sys
-import os
 import time
 
-# ---------------------------------------------------------------------------
-# Konfiguration
-# ---------------------------------------------------------------------------
+try:
+    import pyatspi
+except ImportError:
+    sys.exit("Error: pyatspi not installed — run: pip install pyatspi")
 
-# Welche Rollen sollen angezeigt werden?
+try:
+    from PyQt6.QtCore import Qt, QRect, QTimer
+    from PyQt6.QtGui import QColor, QPainter, QPen
+    from PyQt6.QtWidgets import (
+        QApplication, QFrame, QLabel, QLineEdit,
+        QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
+    )
+except ImportError:
+    sys.exit("Error: PyQt6 not installed — run: pip install PyQt6")
+
+# ── AT-SPI config ─────────────────────────────────────────────────────────────
+
 INTERESTING_ROLES = {
-    "push button",
-    "toggle button",
-    "menu item",
-    "check menu item",
-    "radio menu item",
-    "menu",
-    "check box",
-    "radio button",
-    "combo box",
-    "tool bar",
-    "split pane",
-    "page tab",
+    "push button", "toggle button", "menu item", "check menu item",
+    "radio menu item", "menu", "check box", "radio button",
+    "combo box", "tool bar", "page tab",
 }
 
-# Maximale Baumtiefe (verhindert Endlosrekursion bei komplexen Apps)
+ROLE_ICONS: dict[str, str] = {
+    "push button":     "⬡",
+    "toggle button":   "⬡",
+    "menu item":       "▸",
+    "check menu item": "✓",
+    "radio menu item": "◉",
+    "menu":            "▾",
+    "check box":       "☐",
+    "radio button":    "◎",
+    "combo box":       "▼",
+    "tool bar":        "━",
+    "page tab":        "⬜",
+}
+
 MAX_DEPTH = 20
 
-# ---------------------------------------------------------------------------
-# Launcher-Erkennung
-# ---------------------------------------------------------------------------
 
-def find_launcher():
-    """Gibt den ersten verfügbaren dmenu-kompatiblen Launcher zurück."""
-    candidates = [
-        ("fuzzel",  ["fuzzel", "--dmenu", "--prompt", "  Aktion: ", "--width", "60"]),
-        ("wofi",    ["wofi", "--dmenu", "--prompt", "Aktion: ", "--insensitive", "--allow-markup"]),
-        ("rofi",    ["rofi", "-dmenu", "-i", "-p", "Aktion"]),
-        ("dmenu",   ["dmenu", "-p", "Aktion:"]),
-    ]
-    for name, cmd in candidates:
-        result = subprocess.run(["which", name], capture_output=True)
-        if result.returncode == 0:
-            return name, cmd
-    return None, None
-
-# ---------------------------------------------------------------------------
-# AT-SPI: Aktive App finden
-# ---------------------------------------------------------------------------
+# ── AT-SPI helpers ────────────────────────────────────────────────────────────
 
 def get_focused_app(desktop):
-    """Gibt die App zurück, deren Fenster gerade den Fokus hat."""
     for app in desktop:
         if app is None:
             continue
         try:
             for i in range(app.childCount):
-                window = app.getChildAtIndex(i)
-                state = window.getState()
-                if state.contains(pyatspi.STATE_ACTIVE):
+                win = app.getChildAtIndex(i)
+                if win.getState().contains(pyatspi.STATE_ACTIVE):
                     return app
         except Exception:
             continue
     return None
 
-# ---------------------------------------------------------------------------
-# AT-SPI: UI-Elemente rekursiv sammeln
-# ---------------------------------------------------------------------------
 
-def collect_elements(node, results, depth=0, breadcrumb=""):
-    """Durchläuft den AT-SPI-Baum und sammelt interaktive Elemente."""
+def collect_elements(node, results: list, depth: int = 0, breadcrumb: str = ""):
     if depth > MAX_DEPTH:
         return
-
     try:
         role = node.getRoleName()
         name = (node.name or "").strip()
 
-        # Breadcrumb für Menüpfade aufbauen
-        if role == "menu" and name:
-            current_crumb = f"{breadcrumb} › {name}" if breadcrumb else name
-        else:
-            current_crumb = breadcrumb
+        crumb = (f"{breadcrumb} › {name}" if breadcrumb else name) \
+            if (role == "menu" and name) else breadcrumb
 
-        # Interessante Elemente mit Namen speichern
         if role in INTERESTING_ROLES and name:
-            display_name = f"{current_crumb} › {name}" if current_crumb and role != "menu" else name
-            results.append({
-                "display":  display_name,
-                "role":     role,
-                "node":     node,
-                "name":     name,
-            })
+            display = f"{crumb} › {name}" if (crumb and role != "menu") else name
+            rect: QRect | None = None
+            try:
+                ext = node.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+                if ext.width > 0 and ext.height > 0:
+                    rect = QRect(ext.x, ext.y, ext.width, ext.height)
+            except Exception:
+                pass
+            results.append({"display": display, "role": role, "node": node, "rect": rect})
 
-        # Kinder traversieren
         for i in range(node.childCount):
             try:
-                child = node.getChildAtIndex(i)
-                collect_elements(child, results, depth + 1, current_crumb)
+                collect_elements(node.getChildAtIndex(i), results, depth + 1, crumb)
             except Exception:
                 continue
-
     except Exception:
         pass
 
-# ---------------------------------------------------------------------------
-# AT-SPI: Element aktivieren
-# ---------------------------------------------------------------------------
 
 def activate_element(node):
-    """Führt die primäre Aktion eines AT-SPI-Elements aus."""
     try:
         action = node.queryAction()
-        # Bevorzugte Aktionsnamen
-        preferred = ["click", "activate", "press", "toggle", "expand or contract", "open"]
+        preferred = {"click", "activate", "press", "toggle", "expand or contract", "open"}
         for i in range(action.nActions):
             if action.getName(i).lower() in preferred:
                 action.doAction(i)
-                return True
-        # Fallback: erste verfügbare Aktion
+                return
         if action.nActions > 0:
             action.doAction(0)
-            return True
+            return
     except Exception:
         pass
-
-    # Fallback: Fokus setzen und Enter simulieren
     try:
         node.grabFocus()
     except Exception:
         pass
 
-    return False
 
-# ---------------------------------------------------------------------------
-# Launcher anzeigen und Auswahl verarbeiten
-# ---------------------------------------------------------------------------
+# ── Highlight overlay ─────────────────────────────────────────────────────────
 
-def show_palette(elements, launcher_name, launcher_cmd):
-    """Zeigt die Command Palette und gibt das gewählte Element zurück."""
-    ROLE_ICONS = {
-        "push button":      "⬡",
-        "toggle button":    "⬡",
-        "menu item":        "▸",
-        "check menu item":  "✓",
-        "radio menu item":  "◉",
-        "menu":             "▾",
-        "check box":        "☐",
-        "radio button":     "◎",
-        "combo box":        "▼",
-        "tool bar":         "━",
-        "page tab":         "⬜",
-    }
+_HIGHLIGHT = QColor(99, 162, 255)   # KDE accent blue
 
-    lines = []
-    for el in elements:
-        icon = ROLE_ICONS.get(el["role"], "•")
-        lines.append(f"{icon}  {el['display']}")
 
-    input_text = "\n".join(lines)
+class HighlightOverlay(QWidget):
+    """Transparent frameless window drawn over the target element."""
 
-    try:
-        result = subprocess.run(
-            launcher_cmd,
-            input=input_text,
-            capture_output=True,
-            text=True,
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except FileNotFoundError:
-        print(f"[Fehler] Launcher '{launcher_name}' nicht gefunden.", file=sys.stderr)
-    except Exception as e:
-        print(f"[Fehler] Launcher: {e}", file=sys.stderr)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._inner = QRect()
 
-    return None
+    def show_at(self, rect: QRect | None):
+        if not rect or rect.isEmpty():
+            self.hide()
+            return
+        pad = 4
+        self.setGeometry(rect.adjusted(-pad, -pad, pad, pad))
+        self._inner = QRect(pad, pad, rect.width(), rect.height())
+        self.show()
+        self.raise_()
+        self.update()
 
-# ---------------------------------------------------------------------------
-# Hauptprogramm
-# ---------------------------------------------------------------------------
+    def paintEvent(self, _):
+        if self._inner.isEmpty():
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fill = QColor(_HIGHLIGHT)
+        fill.setAlpha(50)
+        p.fillRect(self._inner, fill)
+        pen = QPen(_HIGHLIGHT, 2)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.drawRoundedRect(self._inner.adjusted(1, 1, -1, -1), 3, 3)
+
+
+# ── Search dialog ─────────────────────────────────────────────────────────────
+
+_STYLE = """
+QFrame#shell {
+    background: #1e1e2e;
+    border: 1px solid #585b70;
+    border-radius: 10px;
+}
+QLineEdit {
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+    border-radius: 5px;
+    padding: 7px 10px;
+    font-size: 14px;
+}
+QListWidget {
+    background: transparent;
+    color: #cdd6f4;
+    border: none;
+    font-size: 13px;
+    outline: 0;
+}
+QListWidget::item {
+    padding: 5px 8px;
+    border-radius: 4px;
+}
+QListWidget::item:selected {
+    background: #45475a;
+}
+QLabel#count {
+    color: #6c7086;
+    font-size: 11px;
+    padding: 0 2px 2px 2px;
+}
+"""
+
+
+class SearchDialog(QWidget):
+    def __init__(self, elements: list, app_name: str):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.elements = elements
+        self.filtered: list = []
+        self.overlay = HighlightOverlay()
+        self._build_ui(app_name)
+        self._filter("")
+
+    def _build_ui(self, app_name: str):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        shell = QFrame()
+        shell.setObjectName("shell")
+        shell.setStyleSheet(_STYLE)
+        v = QVBoxLayout(shell)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(6)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(f"Search in {app_name}…")
+        self.search.textChanged.connect(self._filter)
+        self.search.returnPressed.connect(self._activate)
+
+        self.count_label = QLabel()
+        self.count_label.setObjectName("count")
+
+        self.lst = QListWidget()
+        self.lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lst.itemSelectionChanged.connect(self._on_row_changed)
+        self.lst.itemDoubleClicked.connect(self._activate)
+
+        v.addWidget(self.search)
+        v.addWidget(self.count_label)
+        v.addWidget(self.lst)
+        outer.addWidget(shell)
+
+        self.resize(640, 420)
+        geo = QApplication.primaryScreen().geometry()
+        self.move((geo.width() - self.width()) // 2, geo.height() // 5)
+
+    # ── filtering ────────────────────────────────────────────────────────────
+
+    def _filter(self, text: str):
+        q = text.lower()
+        self.filtered = (
+            [e for e in self.elements if q in e["display"].lower()]
+            if q else self.elements[:]
+        )
+        self.lst.clear()
+        for el in self.filtered:
+            icon = ROLE_ICONS.get(el["role"], "•")
+            self.lst.addItem(QListWidgetItem(f"{icon}  {el['display']}"))
+        n = len(self.filtered)
+        self.count_label.setText(f"{n} element{'s' if n != 1 else ''}")
+        if self.filtered:
+            self.lst.setCurrentRow(0)
+        else:
+            self.overlay.hide()
+
+    def _on_row_changed(self):
+        row = self.lst.currentRow()
+        if 0 <= row < len(self.filtered):
+            self.overlay.show_at(self.filtered[row].get("rect"))
+
+    # ── activation ───────────────────────────────────────────────────────────
+
+    def _activate(self):
+        row = self.lst.currentRow()
+        if not (0 <= row < len(self.filtered)):
+            return
+        node = self.filtered[row]["node"]
+        self.overlay.hide()
+        self.hide()
+        QTimer.singleShot(80, lambda: activate_element(node))
+        QTimer.singleShot(160, QApplication.quit)
+
+    # ── keyboard ─────────────────────────────────────────────────────────────
+
+    def keyPressEvent(self, ev):
+        k = ev.key()
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if k == Qt.Key.Key_Escape:
+            self.overlay.hide()
+            QApplication.quit()
+        elif k == Qt.Key.Key_Down or (k == Qt.Key.Key_Tab and not shift):
+            row = self.lst.currentRow()
+            if row < self.lst.count() - 1:
+                self.lst.setCurrentRow(row + 1)
+        elif k == Qt.Key.Key_Up or (k == Qt.Key.Key_Tab and shift):
+            row = self.lst.currentRow()
+            if row > 0:
+                self.lst.setCurrentRow(row - 1)
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._activate()
+        else:
+            self.search.setFocus()
+            QApplication.sendEvent(self.search, ev)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # pyatspi importieren (erst hier, damit Fehlermeldung klar ist)
-    global pyatspi
-    try:
-        import pyatspi as _pyatspi
-        pyatspi = _pyatspi
-    except ImportError:
-        print(
-            "[Fehler] pyatspi nicht installiert.\n"
-            "  Installieren mit: pip install pyatspi",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Launcher suchen
-    launcher_name, launcher_cmd = find_launcher()
-    if not launcher_name:
-        print(
-            "[Fehler] Kein Launcher gefunden.\n"
-            "  Installiere einen dieser: fuzzel, wofi, rofi, dmenu",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Desktop-Baum holen
+    # Collect elements BEFORE Qt init so the focused app is still the target.
     desktop = pyatspi.Registry.getDesktop(0)
-
-    # Aktive App finden
-    app = get_focused_app(desktop)
-    if not app:
-        # Kurz warten und nochmal versuchen (Hotkey-Lag)
+    app_node = get_focused_app(desktop)
+    if not app_node:
         time.sleep(0.15)
-        app = get_focused_app(desktop)
+        app_node = get_focused_app(desktop)
+    if not app_node:
+        sys.exit("[Error] No active app found.")
 
-    if not app:
-        print("[Fehler] Keine aktive App gefunden.", file=sys.stderr)
-        sys.exit(1)
-
-    app_name = app.name or "Unbekannte App"
-
-    # UI-Elemente sammeln
-    elements = []
-    collect_elements(app, elements)
-
+    elements: list = []
+    collect_elements(app_node, elements)
     if not elements:
-        print(f"[Info] Keine AT-SPI-Elemente in '{app_name}' gefunden.", file=sys.stderr)
-        print("       Möglicherweise unterstützt diese App kein AT-SPI.", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"[Info] No AT-SPI elements found in '{app_node.name}'.")
 
-    # Palette anzeigen
-    # Launcher-Prompt mit App-Name anpassen (nur fuzzel/wofi/rofi)
-    if launcher_name == "fuzzel":
-        launcher_cmd = ["fuzzel", "--dmenu", "--prompt", f"  {app_name}: ", "--width", "70"]
-    elif launcher_name == "wofi":
-        launcher_cmd = ["wofi", "--dmenu", "--prompt", f"{app_name}: ", "--insensitive"]
-    elif launcher_name == "rofi":
-        launcher_cmd = ["rofi", "-dmenu", "-i", "-p", app_name]
+    qt_app = QApplication(sys.argv)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    selection = show_palette(elements, launcher_name, launcher_cmd)
+    dialog = SearchDialog(elements, app_node.name or "app")
+    dialog.show()
+    dialog.search.setFocus()
 
-    if not selection:
-        sys.exit(0)  # Abgebrochen
-
-    # Gewähltes Element finden und aktivieren
-    for el in elements:
-        icon = {"push button": "⬡", "toggle button": "⬡", "menu item": "▸",
-                "check menu item": "✓", "radio menu item": "◉", "menu": "▾",
-                "check box": "☐", "radio button": "◎", "combo box": "▼",
-                "tool bar": "━", "page tab": "⬜"}.get(el["role"], "•")
-        expected = f"{icon}  {el['display']}"
-        if expected == selection:
-            success = activate_element(el["node"])
-            if success:
-                print(f"[OK] Aktiviert: {el['display']}")
-            else:
-                print(f"[Warn] Element gefunden, aber Aktivierung fehlgeschlagen: {el['display']}")
-            break
-    else:
-        print(f"[Warn] Gewähltes Element nicht zuordenbar: {selection}", file=sys.stderr)
+    sys.exit(qt_app.exec())
 
 
 if __name__ == "__main__":

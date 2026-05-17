@@ -6,7 +6,7 @@
 #   Examples: ./install.sh "Meta+E"  ./install.sh "Ctrl+Alt+Space"
 set -euo pipefail
 
-SHORTCUT="${1:-Meta+Shift+F}"
+SHORTCUT="${1:-Meta+F}"
 INSTALL_DIR="$HOME/.local/share/atspi-search"
 BIN="$HOME/.local/bin/atspi-search"
 KWIN_DIR="$HOME/.local/share/kwin/scripts/atspisearch"
@@ -92,6 +92,22 @@ kwriteconfig6 --file kwinrc --group Plugins --key atspisearchEnabled true
 # Write the shortcut key directly into kglobalshortcutsrc.
 # reconfigure alone does not override an existing (possibly empty) stored binding,
 # so we set it explicitly before loading the script.
+# Clear any orphaned bindings for the chosen key before claiming it.
+python3 - "$SHORTCUT" << 'PYEOF'
+import sys, re, pathlib
+key = sys.argv[1]
+path = pathlib.Path.home() / ".config/kglobalshortcutsrc"
+if not path.exists():
+    sys.exit(0)
+text = path.read_text()
+# Replace any existing binding that uses this key with 'none'
+text = re.sub(
+    r'(?m)^(?!atspi-search=)([^=\n]+=)([^\n]*\b' + re.escape(key) + r'\b[^\n]*)',
+    lambda m: m.group(1) + m.group(2).replace(key, "none"),
+    text,
+)
+path.write_text(text)
+PYEOF
 kwriteconfig6 --file kglobalshortcutsrc --group kwin \
     --key "atspi-search" "$SHORTCUT,$SHORTCUT,Search UI Elements"
 

@@ -21,13 +21,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── 1. dependency check ───────────────────────────────────────────────────────
 echo "==> Checking Python dependencies..."
-missing=0
-for pkg in pyatspi pywayland dbus; do
-    python3 -c "import $pkg" 2>/dev/null || { echo "  MISSING: $pkg  →  pip install $pkg  or  pacman -S python-dbus"; missing=1; }
+
+IS_ARCH=0
+command -v pacman &>/dev/null && [ -f /etc/arch-release ] && IS_ARCH=1
+
+# pairs: "python import statement" "pacman package"
+declare -A _IMPORT=(
+    [pyatspi]="import pyatspi"
+    [pywayland]="import pywayland"
+    [dbus]="import dbus"
+    [pyqt6]="import PyQt6.QtCore"
+    [gobject]="from gi.repository import GLib"
+)
+declare -A _PACMAN=(
+    [pyatspi]="python-pyatspi"
+    [pywayland]="python-pywayland"
+    [dbus]="python-dbus"
+    [pyqt6]="python-pyqt6"
+    [gobject]="python-gobject"
+)
+
+missing_pkgs=()
+for key in pyatspi pywayland dbus pyqt6 gobject; do
+    if ! python3 -c "${_IMPORT[$key]}" 2>/dev/null; then
+        echo "  MISSING: ${_PACMAN[$key]}"
+        missing_pkgs+=("${_PACMAN[$key]}")
+    fi
 done
-python3 -c "import PyQt6.QtCore" 2>/dev/null || { echo "  MISSING: PyQt6  →  pip install PyQt6"; missing=1; }
-python3 -c "from gi.repository import GLib" 2>/dev/null || { echo "  MISSING: python-gobject  →  pacman -S python-gobject"; missing=1; }
-[ "$missing" -eq 0 ] || exit 1
+
+if [ "${#missing_pkgs[@]}" -gt 0 ]; then
+    if [ "$IS_ARCH" -eq 1 ]; then
+        echo ""
+        read -r -p "Install missing packages with pacman? [Y/n] " _ans
+        _ans="${_ans:-Y}"
+        if [[ "$_ans" =~ ^[Yy]$ ]]; then
+            sudo pacman -S --needed "${missing_pkgs[@]}"
+            # verify after install
+            for key in pyatspi pywayland dbus pyqt6 gobject; do
+                python3 -c "${_IMPORT[$key]}" 2>/dev/null \
+                    || { echo "  Still missing after install: ${_PACMAN[$key]}"; exit 1; }
+            done
+        else
+            exit 1
+        fi
+    else
+        echo ""
+        echo "Install the missing packages listed above, then re-run install.sh."
+        exit 1
+    fi
+fi
 
 # ── 2. install files ──────────────────────────────────────────────────────────
 echo "==> Installing to $INSTALL_DIR..."

@@ -213,8 +213,11 @@ for i, (name, path, _) in enumerate(candidates, 1):
 print()
 
 try:
-    ans = input("  Patch all? [Y/n/list e.g. 1,3] ").strip()
-except EOFError:
+    sys.stdout.write("  Patch all? [Y/n/list e.g. 1,3] ")
+    sys.stdout.flush()
+    with open("/dev/tty") as tty:
+        ans = tty.readline().strip()
+except Exception:
     sys.exit(0)
 
 if not ans or ans.lower() == "y":

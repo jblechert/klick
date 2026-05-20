@@ -11,6 +11,7 @@ import mmap
 import os
 import signal
 import struct
+import subprocess
 import sys
 import time
 
@@ -20,7 +21,7 @@ except ImportError:
     sys.exit("Error: pyatspi not installed — run: pip install pyatspi")
 
 try:
-    from PyQt6.QtCore import Qt, QRect, QSocketNotifier, QTimer
+    from PyQt6.QtCore import Qt, QEvent, QRect, QSocketNotifier, QTimer
     from PyQt6.QtWidgets import (
         QApplication, QFrame, QLabel, QLineEdit,
         QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
@@ -355,6 +356,7 @@ class SearchDialog(QWidget):
         self.elements = elements
         self.filtered: list = []
         self.overlay = overlay
+        self._activated_once = False   # guard: only quit on focus-loss after first activation
         self._build_ui(app_name)
         self._filter("")
 
@@ -431,6 +433,16 @@ class SearchDialog(QWidget):
         QTimer.singleShot(80,  lambda: activate_element(node))
         QTimer.singleShot(160, self._quit)
 
+    # ── focus loss ────────────────────────────────────────────────────────────
+
+    def changeEvent(self, ev):
+        super().changeEvent(ev)
+        if ev.type() == QEvent.Type.ActivationChange:
+            if self.isActiveWindow():
+                self._activated_once = True
+            elif self._activated_once:
+                self._quit()
+
     # ── keyboard ──────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, ev):
@@ -456,6 +468,18 @@ class SearchDialog(QWidget):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _notify(summary: str, body: str) -> None:
+    """Show a desktop notification (best-effort; silent if notify-send missing)."""
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "atspi-search", "-i", "dialog-information",
+             "-t", "4000", summary, body],
+            check=False,
+        )
+    except FileNotFoundError:
+        pass  # notify-send not installed; silently ignore
+
+
 def main():
     # Collect AT-SPI elements BEFORE Qt takes focus away from the target app.
     desktop = pyatspi.Registry.getDesktop(0)
@@ -464,12 +488,21 @@ def main():
         time.sleep(0.15)
         app_node = get_focused_app(desktop)
     if not app_node:
+        _notify("atspi-search", "No focused window found.\nMake sure a window is active before pressing the shortcut.")
         sys.exit("[Error] No active app found.")
 
     elements: list = []
     collect_elements(app_node, elements)
     if not elements:
-        sys.exit(f"[Info] No AT-SPI elements found in '{app_node.name}'.")
+        name = app_node.name or "this application"
+        _notify(
+            f"{name} is not supported",
+            f"'{name}' does not expose accessible UI elements.\n"
+            "Apps like VS Code and Chromium require accessibility to be explicitly enabled:\n"
+            "• Chromium/Chrome: launch with --force-renderer-accessibility\n"
+            "• VS Code: add \"editor.accessibilitySupport\": \"on\" to settings.json",
+        )
+        sys.exit(f"[Info] No AT-SPI elements found in '{name}'.")
 
     qt_app = QApplication(sys.argv)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -477,6 +510,7 @@ def main():
     overlay = WaylandHighlightOverlay()
     dialog = SearchDialog(elements, app_node.name or "app", overlay)
     dialog.show()
+    dialog.activateWindow()
     dialog.search.setFocus()
 
     sys.exit(qt_app.exec())

@@ -149,16 +149,22 @@ CHROMIUM_BINS = {
     "code", "code-oss", "codium", "vscodium",
 }
 
-def is_electron_binary(binary: str) -> bool:
+def is_chromium_based(binary: str) -> bool:
     try:
         p = pathlib.Path(binary).resolve()
         if not p.is_file():
             return False
         data = p.read_bytes()
-        if data[:2] == b'#!' and b'electron' in data[:512].lower():
-            return True
+        if data[:2] == b'#!':
+            head = data[:512].lower()
+            if any(kw in head for kw in (b'electron', b'chromium', b'chrome')):
+                return True
         for d in [p.parent, p.parent.parent]:
-            if (d / "resources" / "app.asar").exists():
+            if (d / "resources" / "app.asar").exists():    # Electron
+                return True
+            if (d / "chrome_100_percent.pak").exists():    # Chromium fork
+                return True
+            if (d / "icudtl.dat").exists():                # Chromium / CEF
                 return True
     except Exception:
         pass
@@ -183,7 +189,7 @@ def find_candidates():
                     continue
                 binary = exec_lines[0].split("=", 1)[1].strip().split()[0]
                 bname = os.path.basename(binary)
-                if bname in CHROMIUM_BINS or is_electron_binary(binary):
+                if bname in CHROMIUM_BINS or is_chromium_based(binary):
                     name_m = re.search(r'^Name=(.+)$', text, re.MULTILINE)
                     results.append((name_m.group(1) if name_m else f.stem, f, text))
             except Exception:

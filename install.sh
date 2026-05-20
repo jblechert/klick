@@ -137,7 +137,7 @@ echo "    Shortcut $SHORTCUT is active."
 echo ""
 echo "==> Scanning installed apps for accessibility compatibility..."
 python3 - << 'PYEOF'
-import os, pathlib, re, sys
+import os, pathlib, re, shutil, sys
 
 FLAG = "--force-renderer-accessibility"
 USER_APPS = pathlib.Path.home() / ".local/share/applications"
@@ -188,6 +188,8 @@ def find_candidates():
                 if not exec_lines:
                     continue
                 binary = exec_lines[0].split("=", 1)[1].strip().split()[0]
+                if not binary.startswith("/"):
+                    binary = shutil.which(binary) or binary
                 bname = os.path.basename(binary)
                 if bname in CHROMIUM_BINS or is_chromium_based(binary):
                     name_m = re.search(r'^Name=(.+)$', text, re.MULTILINE)

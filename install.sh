@@ -133,7 +133,110 @@ sleep 1   # wait for daemon to register with kglobalaccel
 
 echo "    Shortcut $SHORTCUT is active."
 
-# ── 7. PATH reminder ──────────────────────────────────────────────────────────
+# ── 7. optional: patch .desktop files for accessibility ──────────────────────
+echo ""
+echo "==> Scanning installed apps for accessibility compatibility..."
+python3 - << 'PYEOF'
+import os, pathlib, re, sys
+
+FLAG = "--force-renderer-accessibility"
+USER_APPS = pathlib.Path.home() / ".local/share/applications"
+
+CHROMIUM_BINS = {
+    "chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
+    "brave-browser", "brave", "vivaldi-stable", "vivaldi", "opera",
+    "thorium", "ungoogled-chromium", "microsoft-edge", "microsoft-edge-stable",
+    "code", "code-oss", "codium", "vscodium",
+}
+
+def is_electron_binary(binary: str) -> bool:
+    try:
+        p = pathlib.Path(binary).resolve()
+        if not p.is_file():
+            return False
+        data = p.read_bytes()
+        if data[:2] == b'#!' and b'electron' in data[:512].lower():
+            return True
+        for d in [p.parent, p.parent.parent]:
+            if (d / "resources" / "app.asar").exists():
+                return True
+    except Exception:
+        pass
+    return False
+
+def find_candidates():
+    seen, results = set(), []
+    for d in [pathlib.Path("/usr/share/applications"),
+              pathlib.Path.home() / ".local/share/applications"]:
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.desktop")):
+            if f.name in seen:
+                continue
+            seen.add(f.name)
+            try:
+                text = f.read_text()
+                if FLAG in text:
+                    continue
+                exec_lines = [l for l in text.splitlines() if re.match(r'^Exec\s*=', l)]
+                if not exec_lines:
+                    continue
+                binary = exec_lines[0].split("=", 1)[1].strip().split()[0]
+                bname = os.path.basename(binary)
+                if bname in CHROMIUM_BINS or is_electron_binary(binary):
+                    name_m = re.search(r'^Name=(.+)$', text, re.MULTILINE)
+                    results.append((name_m.group(1) if name_m else f.stem, f, text))
+            except Exception:
+                continue
+    return results
+
+def patch_exec(text: str) -> str:
+    def _fix(m):
+        val = m.group(1)
+        if FLAG in val:
+            return "Exec=" + val
+        parts = val.split(None, 1)
+        if not parts or os.path.basename(parts[0]) in ("env", "sh", "bash", "fish"):
+            return "Exec=" + val
+        rest = (" " + parts[1]) if len(parts) > 1 else ""
+        return f"Exec={parts[0]} {FLAG}{rest}"
+    return re.sub(r'^Exec=(.+)$', _fix, text, flags=re.MULTILINE)
+
+candidates = find_candidates()
+if not candidates:
+    print("  No Electron/Chromium apps found that need patching.")
+    sys.exit(0)
+
+print(f"  Found {len(candidates)} app(s) that may benefit from {FLAG}:\n")
+for i, (name, path, _) in enumerate(candidates, 1):
+    print(f"  [{i}] {name}  ({path})")
+print()
+
+try:
+    ans = input("  Patch all? [Y/n/list e.g. 1,3] ").strip()
+except EOFError:
+    sys.exit(0)
+
+if not ans or ans.lower() == "y":
+    selected = candidates
+elif ans.lower() == "n":
+    sys.exit(0)
+else:
+    try:
+        indices = [int(x.strip()) - 1 for x in ans.split(",")]
+        selected = [candidates[i] for i in indices if 0 <= i < len(candidates)]
+    except Exception:
+        print("  Invalid input, skipping.")
+        sys.exit(0)
+
+USER_APPS.mkdir(parents=True, exist_ok=True)
+for name, src_path, text in selected:
+    dest = USER_APPS / src_path.name
+    dest.write_text(patch_exec(text))
+    print(f"  Patched → {dest}")
+PYEOF
+
+# ── 8. PATH reminder ──────────────────────────────────────────────────────────
 if ! echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
     echo ""
     echo "Note: $HOME/.local/bin is not in your PATH."

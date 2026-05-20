@@ -4,7 +4,8 @@ Keyboard-driven UI element navigator for KDE Plasma 6 on Wayland.
 
 Press a global hotkey over any window, type to fuzzy-search its buttons, menus, tabs, and checkboxes, then hit Enter to activate the element — without touching the mouse.
 
-![klick search dialog with element highlight](https://raw.githubusercontent.com/jblechert/klick/master/screenshot.png)
+![klick search dialog](screenshot_1.png)
+![klick element highlight](screenshot_2.png)
 
 ## How it works
 

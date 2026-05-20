@@ -36,6 +36,7 @@ The installer:
 - Creates wrapper scripts in `~/.local/bin/`
 - Registers a KDE autostart entry so the hotkey daemon starts with your session
 - Starts the hotkey daemon immediately
+- Scans installed apps and offers to patch Electron/Chromium-based apps (VS Code, Brave, Chrome, …) so they expose their UI elements — patched `.desktop` files are written to `~/.local/share/applications/`, system files are never modified
 
 ## Usage
 
@@ -50,19 +51,9 @@ The installer:
 
 ## App compatibility
 
-Most native apps (GTK, Qt, KDE) work out of the box. Some apps require accessibility to be explicitly enabled:
+Most native apps (GTK, Qt, KDE) work out of the box. Electron and Chromium-based apps require `--force-renderer-accessibility` to expose their UI elements — `install.sh` detects and patches these automatically.
 
-**Chromium / Chrome / Electron apps**
-```
---force-renderer-accessibility
-```
-Add to the app's `.desktop` file or launch via terminal.
-
-**VS Code**
-```json
-"editor.accessibilitySupport": "on"
-```
-Add to `settings.json` (`Ctrl+Shift+P` → *Open User Settings (JSON)*).
+To patch manually, add `--force-renderer-accessibility` to the `Exec=` line in `~/.local/share/applications/<app>.desktop`.
 
 ## Uninstall
 
